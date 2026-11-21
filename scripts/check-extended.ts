@@ -21,6 +21,10 @@ if (first.kind === 'heist') {
     const minCrew: number | null = first.minCrew;
     void crew; void minCrew;
 }
+// String enums are literal unions, so plain string comparisons type-check.
+const phase: Phase = floor.phases[0]!;
+if (phase === 'betting' && Phase.Betting !== 'betting') throw new Error('Phase.Betting should be "betting"');
+
 const second = floor.games[1]!;
 if (second.kind !== 'crash' || second.startPhase !== Phase.Crashed)
     throw new Error('crash should default startPhase to crashed-out');

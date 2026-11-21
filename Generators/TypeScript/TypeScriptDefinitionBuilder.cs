@@ -103,7 +103,9 @@ public class TypeScriptDefinitionBuilder : IDefinitionBuilder<TypeScriptCompiler
                 int lastDotIdx = enumPrefix.LastIndexOf('.');
                 if (lastDotIdx >= 0 && lastDotIdx < enumPrefix.Length - 1)
                     enumPrefix = enumPrefix[(lastDotIdx + 1)..];
-                string value = string.Join(" | ", enumValue.Values.Select(x => $"{enumPrefix}.{x}"));
+                bool isStringEnum = enumValue.Type is EnumType { OwnedEnum.IsString: true };
+                string value = string.Join(" | ", enumValue.Values.Select(x =>
+                    $"{enumPrefix}.{(isStringEnum ? Compiler.GetStringEnumMemberName(x) : x)}"));
                 return new SomeDataValue(value);
             case MapValue:
                 throw new NotImplementedException();

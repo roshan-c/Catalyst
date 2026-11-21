@@ -30,7 +30,7 @@ public class TypeScriptCompiler : Compiler
     {
         return file.Definitions.Count > 0 || file.Unions.Count > 0 ||
                (ClientServiceBuilder is not null && file.Services.Count > 0) ||
-               file.Enums.Any(builtEnum => builtEnum.Node.Flags == true);
+               file.Enums.Any(builtEnum => builtEnum.Node.Flags == true || builtEnum.Node.IsString);
     }
 
     public override CompiledFile Compile(BuiltFile file)
@@ -65,20 +65,20 @@ public class TypeScriptCompiler : Compiler
         foreach (var builtEnum in file.Enums)
         {
             AppendDescriptionComment(sb, builtEnum.Node);
+
+            if (builtEnum.Node.IsString)
+            {
+                AppendStringEnum(sb, builtEnum);
+                sb.AppendLine();
+                continue;
+            }
+
             sb.AppendLine($"export enum {builtEnum.Name} {{");
 
             for (var enumValueIdx = 0; enumValueIdx < builtEnum.Values.Count; enumValueIdx++)
             {
                 BuiltEnumValue builtEnumValue = builtEnum.Values[enumValueIdx];
-                if (builtEnum.Node.IsString)
-                {
-                    string wireValue = builtEnum.Node.WireValues[builtEnumValue.Label];
-                    sb.Append($"    {GetCompiledPropertyKey(builtEnumValue.Label)} = {ToStringLiteral(wireValue)}");
-                }
-                else
-                {
-                    sb.Append($"    {builtEnumValue.Label} = {builtEnumValue.Value}");
-                }
+                sb.Append($"    {builtEnumValue.Label} = {builtEnumValue.Value}");
                 if (enumValueIdx < builtEnum.Values.Count - 1)
                     sb.Append(',');
                 sb.AppendLine();
@@ -223,6 +223,46 @@ public class TypeScriptCompiler : Compiler
             if (defIdx < file.Definitions.Count - 1)
                 sb.AppendLine();
         }
+    }
+
+    /// <summary>
+    /// A string enum is a const object of its values plus the union of their literal types,
+    /// rather than a TS <c>enum</c>: a string <c>enum</c> refuses comparisons with plain string
+    /// literals, which is how wire values are usually checked. In Effect Schema mode a
+    /// <c>{Name}Schema</c> validates the values.
+    /// </summary>
+    private void AppendStringEnum(StringBuilder sb, BuiltEnum builtEnum)
+    {
+        List<string> wireValues = builtEnum.Values
+            .Select(value => ToStringLiteral(builtEnum.Node.WireValues[value.Label]))
+            .ToList();
+
+        sb.AppendLine($"export const {builtEnum.Name} = {{");
+        for (var valueIdx = 0; valueIdx < builtEnum.Values.Count; valueIdx++)
+        {
+            sb.Append($"    {GetStringEnumMemberName(builtEnum.Values[valueIdx].Label)}: {wireValues[valueIdx]}");
+            if (valueIdx < builtEnum.Values.Count - 1)
+                sb.Append(',');
+            sb.AppendLine();
+        }
+        sb.AppendLine("} as const;");
+        sb.AppendLine();
+        sb.AppendLine($"export type {builtEnum.Name} = (typeof {builtEnum.Name})[keyof typeof {builtEnum.Name}];");
+
+        if (UsesEffectSchema)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"export const {builtEnum.Name}Schema = Schema.Literal({string.Join(", ", wireValues)});");
+        }
+    }
+
+    /// <summary>
+    /// A string enum's member name: its label in PascalCase, since a bare value such as
+    /// <c>net_worth</c> is both the label and the wire value.
+    /// </summary>
+    public string GetStringEnumMemberName(string label)
+    {
+        return GetCompiledPropertyKey(label.ToPascalCase());
     }
 
     private static void AppendEffectFlagsEnumSchema(StringBuilder sb, BuiltEnum builtEnum)
@@ -559,7 +599,7 @@ public class TypeScriptCompiler : Compiler
                 return "Schema.String";
             case EnumType enumType:
                 string enumName = GetSimpleUserTypeName(enumType);
-                return enumType.OwnedEnum.Flags == true
+                return enumType.OwnedEnum.Flags == true || enumType.OwnedEnum.IsString
                     ? $"{enumName}Schema"
                     : $"Schema.Enums({enumName})";
             case ObjectType or UnionType:
@@ -733,7 +773,8 @@ public class TypeScriptCompiler : Compiler
                 }
                 symbols.Add(symbol);
 
-                if (includeSchemaSymbols && UsesEffectSchema && userType is EnumType { OwnedEnum.Flags: true })
+                if (includeSchemaSymbols && UsesEffectSchema &&
+                    userType is EnumType { OwnedEnum.Flags: true } or EnumType { OwnedEnum.IsString: true })
                     symbols.Add($"{symbol}Schema");
                 break;
             }

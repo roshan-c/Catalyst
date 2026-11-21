@@ -203,7 +203,9 @@ Custom patterns can also be specified as regular expressions directly.
 ## String Enums
 An enum with `type: str` is written to the wire as strings instead of integers. Each value is
 either a bare string, used as both the label and the wire value, or `Label: wire-value`.
-String enums cannot be flags enums. Supported by the Python and TypeScript generators.
+String enums cannot be flags enums. Supported by the Python and TypeScript generators: Python
+emits a `str` enum, and TypeScript a const object of the values plus their literal union type
+(with a `NameSchema` validator in Effect Schema mode), so values compare with plain strings.
 
 ```yaml
 enums:
