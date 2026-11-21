@@ -154,3 +154,5 @@ Unreal Engine 5 Client (requires the [Unreal Engine Catalyst Plugin](https://git
 TypeScript Client (plain classes by default, Effect Schema definitions with `--TsSchema=effect`)
 ### Python
 Python Client
+
+All generators accept `--NoTimestamp=true` to leave the generation time out of file headers, so the same spec always produces byte-identical output.

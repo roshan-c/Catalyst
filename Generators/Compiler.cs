@@ -12,7 +12,8 @@ public record CompilerOptions(
     string? ClientServiceBuilderName, 
     string? ServerServiceBuilderName,
     string? ValidatorBuilderName,
-    string? TypeScriptSchema = null);
+    string? TypeScriptSchema = null,
+    bool NoTimestamp = false);
 
 public abstract class Compiler
 {
@@ -32,8 +33,20 @@ public abstract class Compiler
     List<IServerServiceBuilder> AllServerServiceBuilders { get; } = [];
     List<IValidatorBuilder> AllValidatorBuilders { get; } = [];
 
+    /// <summary>
+    /// When true, generated file headers leave out the generation time, so the same spec
+    /// always produces byte-identical output.
+    /// </summary>
+    protected bool NoTimestamp { get; }
+
+    /// <summary>
+    /// The " at {time}" part of a generated file header, or nothing when timestamps are off.
+    /// </summary>
+    protected string GeneratedAt => NoTimestamp ? string.Empty : $" at {DateTime.Now}";
+
     protected Compiler(CompilerOptions options)
     {
+        NoTimestamp = options.NoTimestamp;
         FindAllBuildersForCompiler();
         
         EnumBuilder = 

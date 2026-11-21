@@ -40,7 +40,8 @@ CompilerOptions compilerOptions = new(
     ClientServiceBuilderName: config.ClientBuilder,
     ServerServiceBuilderName: config.ServerBuilder,
     ValidatorBuilderName: config.ValidatorBuilder,
-    TypeScriptSchema: config.TsSchema);
+    TypeScriptSchema: config.TsSchema,
+    NoTimestamp: config.NoTimestamp);
 
 FileInfo[] inputFiles = GetInputFiles();
 
