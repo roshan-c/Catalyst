@@ -1,0 +1,49 @@
+enums:
+  Phase:
+    description: Where a round is. Sent as a string.
+    type: str
+    values:
+      - betting
+      - flying
+      - Crashed: crashed-out
+
+definitions:
+  Heist:
+    desc: A heist sign-up.
+    properties:
+      crew: i32
+      minCrew:
+        type: i32?
+        presence: nullable
+        desc: Null on a classic heist, but always sent.
+      closesAt:
+        type: i32?
+        presence: optional
+  Crash:
+    properties:
+      phase: Phase
+      multiplier:
+        type: f64?
+        presence: optional
+      lastPhase:
+        type: Phase?
+        presence: optional
+      startPhase:
+        type: Phase
+        default: Crashed
+  Floor:
+    properties:
+      games: list<Game>
+      featured:
+        type: Game?
+        presence: optional
+      byName: map<str, Game>
+      phases: list<Phase>
+
+unions:
+  Game:
+    description: One live game on the floor.
+    discriminator: kind
+    variants:
+      heist: Heist
+      crash: Crash

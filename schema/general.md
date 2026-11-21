@@ -8,6 +8,7 @@ The root of the schema is a YAML document that can contain the following top-lev
 - `includes`: A list of paths to other schema files that should be included and processed. Paths are relative to the current file.
 - `enums`: Contains enum definitions.
 - `definitions`: Contains definitions of data structures (objects, entities).
+- `unions`: Contains discriminated unions of definitions. Supported by the Python and TypeScript generators.
 - `services`: Defines the API endpoints and operations grouped by service.
 - `endpoints`: Shorthand for defining endpoints in a default service.
 - Language-Specific Sections (e.g. `cs`, `unreal`, `ts`): Allow for language-specific configurations for this document.
@@ -128,6 +129,10 @@ A property definition can have the following keys:
   - `[Namespace.]DefinitionName`: reference to another defined data structure
   - Every type (except `any`) can also be **optional** by suffixing it with `?` (e.g. `str?`)
 - `description` (alt: `desc`): A human-readable description of the property.
+- `presence`: For an optional (`T?`) property only, how it appears on the wire. Supported by the Python and TypeScript generators.
+  - Omitted: the key may be absent and the value may be null (the default).
+  - `optional`: the key may be absent, but is never null. Generators leave the key out instead of writing null.
+  - `nullable`: the key is always present, but the value may be null. Decoders require the key.
 - `default`: Default value to assign to the property. A value of `default` means to use the default value for the property type.
 - `min`: Minimum value for validation (numeric types, strings, lists).
 - `max`: Maximum value for validation (numeric types, strings, lists).
@@ -194,6 +199,54 @@ The following built-in patterns are available for string validation:
 | `phone`        | E.164 phone number                            | `^\+?[1-9]\d{1,14}$`                                                                                          |
 
 Custom patterns can also be specified as regular expressions directly.
+
+## String Enums
+An enum with `type: str` is written to the wire as strings instead of integers. Each value is
+either a bare string, used as both the label and the wire value, or `Label: wire-value`.
+String enums cannot be flags enums. Supported by the Python and TypeScript generators.
+
+```yaml
+enums:
+  Phase:
+    type: str
+    values:
+      - betting               # label 'betting', wire value "betting"
+      - flying
+      - Crashed: crashed-out  # label 'Crashed', wire value "crashed-out"
+```
+
+## Unions
+Each entry under `unions` defines a discriminated union: a value that is exactly one of several
+definitions, told apart by a string `discriminator` property.
+A union has the following keys:
+- `description` (alt: `desc`): A human-readable description of the union.
+- `discriminator` (required): The wire property that names the variant, such as `kind`.
+- `variants` (required): A map of discriminator value to definition name.
+
+A union's name can be used anywhere a definition's can: as a property type, inside `list`, `set`
+and `map`, and as an optional `Union?`. Each variant writes the discriminator itself, first, so a
+variant definition must not declare that property. A definition can belong to one union.
+Supported by the Python and TypeScript generators; the C# and Unreal generators reject specs that
+use unions.
+
+```yaml
+definitions:
+  Heist:
+    properties:
+      crew: i32
+  Crash:
+    properties:
+      multiplier: f64
+
+unions:
+  Game:
+    discriminator: kind
+    variants:
+      heist: Heist
+      crash: Crash
+```
+
+On the wire, a `Heist` in a `Game` property is `{"kind": "heist", "crew": 3}`.
 
 ## Constants
 Each entry under constants defines a constant field. These are read-only and static

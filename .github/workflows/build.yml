@@ -118,3 +118,30 @@ jobs:
         assert ProductType(ProductType.HOUSEHOLD) == ProductType.HOUSEHOLD
         assert UserRole(UserRole.MODERATOR | UserRole.ADMIN) == UserRole.MODERATOR | UserRole.ADMIN
         EOF
+
+    - name: Test unions, string enums and presence (Python)
+      run: |
+        dotnet run --project . --Language=py --BaseInputDir=./TestDataExtended --BaseOutputDir=./output/py_extended --NoTimestamp=true
+        python -m compileall -q output/py_extended
+        python scripts/check-extended.py
+        pip install --quiet mypy
+        python -m mypy --strict --python-version 3.10 output/py_extended
+
+    - name: Test unions, string enums and presence (TypeScript)
+      run: |
+        dotnet run --project . --Language=ts --TsSchema=effect --BaseInputDir=./TestDataExtended --BaseOutputDir=./output/ts-extended --NoTimestamp=true
+        dotnet run --project . --Language=ts --BaseInputDir=./TestDataExtended --BaseOutputDir=./output/ts-extended-class --NoTimestamp=true
+        mkdir -p /tmp/ts-check && cd /tmp/ts-check && npm init -y >/dev/null && npm install --no-save effect@3.22.4 typescript@5.9.3 tsx@4.20.6
+        cd "$GITHUB_WORKSPACE" && ln -sfn /tmp/ts-check/node_modules node_modules
+        ./node_modules/.bin/tsc --noEmit --strict --target ES2022 --module nodenext --moduleResolution nodenext --skipLibCheck scripts/check-extended.ts output/ts-extended/*.ts
+        ./node_modules/.bin/tsc --noEmit --strict --strictPropertyInitialization false --target ES2022 --module nodenext --moduleResolution nodenext --skipLibCheck output/ts-extended-class/*.ts
+        ./node_modules/.bin/tsx scripts/check-extended.ts
+
+    - name: C# and Unreal reject unions
+      run: |
+        for language in cs unreal; do
+          if dotnet run --project . --Language=$language --BaseInputDir=./TestDataExtended --BaseOutputDir=./output/$language-extended > out.txt 2>&1; then
+            echo "$language accepted a spec it cannot generate"; exit 1
+          fi
+          grep -q "does not support unions" out.txt
+        done

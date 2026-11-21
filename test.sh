@@ -33,5 +33,12 @@ dotnet run -- --Language=py --BaseInputDir=./TestData --BaseOutputDir=./output/p
 echo "Python - OK"
 
 echo ""
+echo "Testing unions, string enums and presence (Python, TypeScript)..."
+dotnet run -- --Language=py --BaseInputDir=./TestDataExtended --BaseOutputDir=./output/py_extended --NoTimestamp=true
+dotnet run -- --Language=ts --TsSchema=effect --BaseInputDir=./TestDataExtended --BaseOutputDir=./output/ts-extended --NoTimestamp=true
+dotnet run -- --Language=ts --BaseInputDir=./TestDataExtended --BaseOutputDir=./output/ts-extended-class --NoTimestamp=true
+echo "Extended - OK"
+
+echo ""
 echo "=========================================="
 echo "All tests passed!"

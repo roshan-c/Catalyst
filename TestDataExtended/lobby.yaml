@@ -1,0 +1,10 @@
+includes:
+  - game
+
+definitions:
+  Lobby:
+    description: Uses the union and string enum from another file.
+    properties:
+      floor: Floor
+      spotlight: Game
+      phase: Phase?
