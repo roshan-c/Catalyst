@@ -496,7 +496,7 @@ public class FileReader
             Parent = new WeakReference<Node>(definitionNode),
             Name = propertyName,
             UnBuiltType = propertyType,
-            Description = (propertyRawNode.ReadPropertyAsStr("description") ?? propertiesRawNode.ReadPropertyAsStr("desc"))?.TrimEnd(),
+            Description = (propertyRawNode.ReadPropertyAsStr("description") ?? propertyRawNode.ReadPropertyAsStr("desc"))?.TrimEnd(),
             Value = unBuiltValue,
             Validation = ReadValidationAttributes(propertyRawNode, propertyType)
         };
