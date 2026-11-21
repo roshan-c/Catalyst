@@ -121,7 +121,7 @@ public class PythonDefinitionBuilder : IDefinitionBuilder<PythonCompiler>
     public IEnumerable<BuiltFunction> BuildSerialiseFunctions(BuildContext context, DefinitionNode definitionNode)
     {
         List<BuiltProperty> properties = BuildProperties(definitionNode);
-        return [BuildToDictFunction(properties), BuildToJsonFunction()];
+        return [BuildToDictFunction(definitionNode, properties), BuildToJsonFunction()];
     }
 
     public IEnumerable<BuiltFunction> BuildDeserialiseFunctions(BuildContext context, DefinitionNode definitionNode)
@@ -149,14 +149,31 @@ public class PythonDefinitionBuilder : IDefinitionBuilder<PythonCompiler>
         return properties;
     }
 
-    private BuiltFunction BuildToDictFunction(List<BuiltProperty> properties)
+    private BuiltFunction BuildToDictFunction(DefinitionNode definitionNode, List<BuiltProperty> properties)
     {
         StringBuilder body = new();
         body.AppendLine("data: dict[str, typing.Any] = {}");
 
+        // A union variant names itself first, so the union can tell it apart on the way back in.
+        if (definitionNode.Union is { } union)
+        {
+            string discriminator = PythonCompiler.ToPythonStringLiteral(union.Discriminator);
+            body.AppendLine($"data[{discriminator}] = {PythonCompiler.ToPythonStringLiteral(definitionNode.UnionTag!)}");
+        }
+
         foreach (BuiltProperty property in properties)
         {
             string key = PythonCompiler.ToPythonStringLiteral(property.Node.Name);
+
+            // An 'optional' property leaves its key out rather than writing null.
+            if (property.Node is PropertyNode { Presence: PropertyPresence.Optional })
+            {
+                string presentValue = Compiler.GetEncodedRequiredExpression(property.Node.BuiltType!, $"self.{property.Name}");
+                body.AppendLine($"if self.{property.Name} is not None:");
+                body.AppendLine($"    data[{key}] = {presentValue}");
+                continue;
+            }
+
             string value = Compiler.GetEncodedExpression(property.Node.BuiltType!, $"self.{property.Name}");
             body.AppendLine($"data[{key}] = {value}");
         }
@@ -192,7 +209,8 @@ public class PythonDefinitionBuilder : IDefinitionBuilder<PythonCompiler>
             string name = PythonCompiler.ToPythonStringLiteral(property.Name);
             string value = Compiler.GetDecodedExpression(property.Node.BuiltType!, $"data[{key}]");
 
-            if (property.Value is NoDataValue)
+            // A 'nullable' property's key is always on the wire, so it is read directly.
+            if (property.Value is NoDataValue || property.Node is PropertyNode { Presence: PropertyPresence.Nullable })
             {
                 body.AppendLine($"values[{name}] = {value}");
                 continue;

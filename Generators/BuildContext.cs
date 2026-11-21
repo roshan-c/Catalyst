@@ -50,6 +50,11 @@ public record BuiltFile(
     List<BuiltService> Services,
     List<BuiltValidator> Validators)
 {
+    /// <summary>
+    /// Discriminated unions emitted into this file. Only compilers that support unions add to it.
+    /// </summary>
+    public List<UnionNode> Unions { get; init; } = [];
+
     public override string ToString()
     {
         return JsonSerializer.Serialize(this, new JsonSerializerOptions{ WriteIndented = true });

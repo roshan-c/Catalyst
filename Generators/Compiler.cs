@@ -44,6 +44,15 @@ public abstract class Compiler
     /// </summary>
     protected string GeneratedAt => NoTimestamp ? string.Empty : $" at {DateTime.Now}";
 
+    /// <summary>Whether this compiler can emit discriminated unions.</summary>
+    protected virtual bool SupportsUnions => false;
+
+    /// <summary>Whether this compiler can emit enums whose wire values are strings.</summary>
+    protected virtual bool SupportsStringEnums => false;
+
+    /// <summary>Whether this compiler honours a property's 'presence'.</summary>
+    protected virtual bool SupportsPropertyPresence => false;
+
     protected Compiler(CompilerOptions options)
     {
         NoTimestamp = options.NoTimestamp;
@@ -77,6 +86,72 @@ public abstract class Compiler
             if (foundBuilder is not null)
                 ValidatorBuilder = foundBuilder;
         }
+    }
+
+    /// <summary>
+    /// Adds a union to the file it should be emitted in. Compilers that support unions override this.
+    /// </summary>
+    protected virtual void BuildUnion(BuildContext context, UnionNode unionNode)
+    {
+        throw new NotSupportedException($"The {Name} compiler does not support unions ('{unionNode.FullName}').");
+    }
+
+    /// <summary>
+    /// Fails early, with a clear message, when a spec uses a feature this compiler can't emit,
+    /// rather than silently generating code with the wrong wire format.
+    /// </summary>
+    void EnsureFeaturesSupported(FileNode fileNode)
+    {
+        if (!SupportsUnions && fileNode.Unions.Count > 0)
+            throw new NotSupportedException(
+                $"The {Name} compiler does not support unions ('{fileNode.Unions.First().Value.FullName}').");
+
+        if (!SupportsStringEnums)
+        {
+            EnumNode? stringEnum = fileNode.Enums.Values.FirstOrDefault(enumNode => enumNode.IsString);
+            if (stringEnum is not null)
+                throw new NotSupportedException(
+                    $"The {Name} compiler does not support string enums ('{stringEnum.FullName}').");
+        }
+
+        // A file can also use a union or string enum declared in another file it includes.
+        IEnumerable<DataMemberNode> dataMembers = fileNode.Definitions.Values
+            .SelectMany(definition => definition.Properties.Values.Cast<DataMemberNode>()
+                .Concat(definition.Constants.Values));
+        foreach (DataMemberNode dataMember in dataMembers)
+        {
+            if (dataMember.BuiltType is null)
+                continue;
+
+            if (!SupportsUnions && UsesType(dataMember.BuiltType, type => type is UnionType))
+                throw new NotSupportedException(
+                    $"The {Name} compiler does not support unions ('{dataMember.FullName}' uses one).");
+
+            if (!SupportsStringEnums && UsesType(dataMember.BuiltType, type => type is EnumType { OwnedEnum.IsString: true }))
+                throw new NotSupportedException(
+                    $"The {Name} compiler does not support string enums ('{dataMember.FullName}' uses one).");
+        }
+
+        if (!SupportsPropertyPresence)
+        {
+            PropertyNode? presenceProperty = fileNode.Definitions.Values
+                .SelectMany(definition => definition.Properties.Values)
+                .FirstOrDefault(property => property.Presence is not PropertyPresence.Default);
+            if (presenceProperty is not null)
+                throw new NotSupportedException(
+                    $"The {Name} compiler does not support 'presence' ('{presenceProperty.FullName}').");
+        }
+    }
+
+    static bool UsesType(IDataType dataType, Func<IDataType, bool> predicate)
+    {
+        return predicate(dataType) || dataType switch
+        {
+            IPropertyContainer1InnerType container => UsesType(container.InnerType, predicate),
+            IPropertyContainer2InnerTypes container => UsesType(container.InnerTypeA, predicate) ||
+                                                       UsesType(container.InnerTypeB, predicate),
+            _ => false
+        };
     }
 
     T? TryCreateBuilder<T>(Type type, Type builderType)
@@ -125,6 +200,8 @@ public abstract class Compiler
     
     public IEnumerable<BuiltFile> Build(FileNode fileNode)
     {
+        EnsureFeaturesSupported(fileNode);
+
         BuildContext buildContext = new(fileNode, []);
 
         foreach (KeyValuePair<string, EnumNode> enumNode in fileNode.Enums)
@@ -132,6 +209,9 @@ public abstract class Compiler
         
         foreach (KeyValuePair<string, DefinitionNode> definitionNode in fileNode.Definitions)
             DefinitionBuilder.Build(buildContext, definitionNode.Value);
+
+        foreach (KeyValuePair<string, UnionNode> unionNode in fileNode.Unions)
+            BuildUnion(buildContext, unionNode.Value);
         
         if (ClientServiceBuilder is not null)
             foreach (KeyValuePair<string, ServiceNode> serviceNode in fileNode.Services)

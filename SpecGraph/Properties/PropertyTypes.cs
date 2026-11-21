@@ -256,3 +256,13 @@ public class EnumType : IUserDataType
 }
 
 public class OptionalEnumType : EnumType, IOptionalDataType;
+
+public class UnionType : IUserDataType
+{
+    public required string Name { get; set; }
+    public required string? Namespace { get; set; }
+    public required FileNode OwnedFile { get; set; }
+    public required UnionNode OwnedUnion { get; set; }
+}
+
+public class OptionalUnionType : UnionType, IOptionalDataType;

@@ -55,6 +55,32 @@ public class PythonCompiler : Compiler
 
     public override string Name => Python.Name;
 
+    protected override bool SupportsUnions => true;
+    protected override bool SupportsStringEnums => true;
+    protected override bool SupportsPropertyPresence => true;
+
+    protected override void BuildUnion(BuildContext context, UnionNode unionNode)
+    {
+        context.GetOrAddFile(this, GetModuleName(context.FileNode)).Unions.Add(unionNode);
+    }
+
+    /// <summary>
+    /// The module-level function that decodes a union from its wire dict, such as
+    /// <c>lobby_game_from_dict</c>.
+    /// </summary>
+    public string GetUnionDecoderName(UnionNode unionNode)
+    {
+        return EnsureIdentifier(unionNode.Name.ToSnakeCase()! + "_from_dict");
+    }
+
+    /// <summary>
+    /// Encodes a value that is known not to be None, without the optional guard.
+    /// </summary>
+    public string GetEncodedRequiredExpression(IDataType dataType, string expression)
+    {
+        return dataType is AnyType ? expression : EncodeRequired(dataType, expression, 1);
+    }
+
     public override IEnumerable<CompiledFile> CompileFiles(BuiltFile file)
     {
         yield return Compile(file);
@@ -89,6 +115,13 @@ public class PythonCompiler : Compiler
         foreach (BuiltDefinition definition in file.Definitions)
         {
             AppendDefinition(sb, definition);
+            sb.AppendLine();
+            sb.AppendLine();
+        }
+
+        foreach (UnionNode union in file.Unions)
+        {
+            AppendUnion(sb, union);
             sb.AppendLine();
             sb.AppendLine();
         }
@@ -422,9 +455,9 @@ public class PythonCompiler : Compiler
                 return $"encode_datetime({expression})";
             case UuidType:
                 return $"str({expression})";
-            case EnumType:
-                return $"int({expression})";
-            case ObjectType:
+            case EnumType enumType:
+                return enumType.OwnedEnum.IsString ? $"{expression}.value" : $"int({expression})";
+            case ObjectType or UnionType:
                 return $"{expression}.to_dict()";
             case ListType listType:
             {
@@ -478,6 +511,8 @@ public class PythonCompiler : Compiler
                 return $"{GetSimpleUserTypeName(enumType)}({expression})";
             case ObjectType objectType:
                 return $"{GetSimpleUserTypeName(objectType)}.from_dict({expression})";
+            case UnionType unionType:
+                return $"{GetUnionDecoderName(unionType.OwnedUnion)}({expression})";
             case ListType listType:
             {
                 if (IsDecodedIdentityType(listType.InnerType))
@@ -519,7 +554,7 @@ public class PythonCompiler : Compiler
         {
             StringType or UrlType or AnyType => expression,
             DateType => $"encode_datetime({expression})",
-            EnumType => $"str(int({expression}))",
+            EnumType enumType => enumType.OwnedEnum.IsString ? $"{expression}.value" : $"str(int({expression}))",
             BooleanType => $"(\"true\" if {expression} else \"false\")",
             _ => $"str({GetEncodedExpression(dataType, expression, depth)})"
         };
@@ -534,7 +569,9 @@ public class PythonCompiler : Compiler
             FloatType or TimeType => $"float({expression})",
             BooleanType => $"{expression} == \"true\"",
             UuidType => $"uuid.UUID({expression})",
-            EnumType enumType => $"{GetSimpleUserTypeName(enumType)}(int({expression}))",
+            EnumType enumType => enumType.OwnedEnum.IsString
+                ? $"{GetSimpleUserTypeName(enumType)}({expression})"
+                : $"{GetSimpleUserTypeName(enumType)}(int({expression}))",
             _ => GetDecodedExpression(dataType, expression, depth)
         };
     }
@@ -553,6 +590,13 @@ public class PythonCompiler : Compiler
 
             foreach (BuiltProperty property in definition.Properties)
                 CollectTypeUsage(file, property.Node.BuiltType!, usage, UsageKind.Encode | UsageKind.Decode);
+        }
+
+        foreach (UnionNode union in file.Unions)
+        {
+            usage.UsesTyping = true;
+            foreach (ObjectType variant in union.Variants.Values)
+                CollectTypeUsage(file, variant, usage, UsageKind.Encode | UsageKind.Decode);
         }
 
         foreach (BuiltService service in file.Services)
@@ -598,7 +642,11 @@ public class PythonCompiler : Compiler
             {
                 string targetModule = GetModuleNameForUserType(userType);
                 if (!string.Equals(targetModule, file.Name, StringComparison.Ordinal))
+                {
                     usage.AddUserImport(targetModule, GetSimpleUserTypeName(userType));
+                    if (userType is UnionType unionType && usageKind.HasFlag(UsageKind.Decode))
+                        usage.AddUserImport(targetModule, GetUnionDecoderName(unionType.OwnedUnion));
+                }
                 break;
             }
         }
@@ -612,6 +660,7 @@ public class PythonCompiler : Compiler
                 new BuildContext(objectType.OwnedFile, []), objectType.OwnedDefinition),
             EnumType enumType => EnumBuilder.GetBuiltFileName(
                 new BuildContext(enumType.OwnedFile, []), enumType.OwnedEnum),
+            UnionType unionType => GetModuleName(unionType.OwnedFile),
             _ => string.Empty
         };
     }
@@ -652,7 +701,7 @@ public class PythonCompiler : Compiler
             imports.Add("import enum");
         if (file.Definitions.Count > 0 || file.Services.Count > 0)
             imports.Add("import json");
-        if (usage.UsesTyping || file.Definitions.Count > 0)
+        if (usage.UsesTyping || file.Definitions.Count > 0 || file.Unions.Count > 0)
             imports.Add("import typing");
         if (file.Services.Count > 0)
         {
@@ -698,7 +747,10 @@ public class PythonCompiler : Compiler
 
     private void AppendEnum(StringBuilder sb, BuiltEnum builtEnum)
     {
-        string baseType = builtEnum.Node.Flags == true ? "enum.IntFlag" : "enum.IntEnum";
+        // String enums subclass str so a member compares equal to its wire value.
+        string baseType = builtEnum.Node.IsString
+            ? "str, enum.Enum"
+            : builtEnum.Node.Flags == true ? "enum.IntFlag" : "enum.IntEnum";
         sb.AppendLine($"class {builtEnum.Name}({baseType}):");
         AppendDocstring(sb, builtEnum.Node, 1);
         if (!string.IsNullOrWhiteSpace(builtEnum.Node.Description))
@@ -707,8 +759,34 @@ public class PythonCompiler : Compiler
         foreach (BuiltEnumValue builtEnumValue in builtEnum.Values)
         {
             string label = GetCompiledEnumValueName(builtEnumValue.Label);
-            sb.AppendLine($"    {label} = {builtEnumValue.Value}");
+            string value = builtEnum.Node.IsString
+                ? ToPythonStringLiteral(builtEnum.Node.WireValues[builtEnumValue.Label])
+                : builtEnumValue.Value.ToString(CultureInfo.InvariantCulture);
+            sb.AppendLine($"    {label} = {value}");
         }
+    }
+
+    private void AppendUnion(StringBuilder sb, UnionNode union)
+    {
+        List<string> variantNames = union.Variants.Values.Select(GetSimpleUserTypeName).ToList();
+        string unionName = union.Name.ToPascalCase();
+        string discriminator = ToPythonStringLiteral(union.Discriminator);
+
+        AppendComment(sb, union.Description, 0);
+        sb.AppendLine($"{unionName} = typing.Union[{string.Join(", ", variantNames)}]");
+        sb.AppendLine();
+        sb.AppendLine();
+        sb.AppendLine($"def {GetUnionDecoderName(union)}(data: dict[str, typing.Any]) -> {unionName}:");
+        sb.AppendLine($"    \"\"\"Decodes a {unionName} by its {discriminator} discriminator.\"\"\"");
+        sb.AppendLine($"    tag = data[{discriminator}]");
+
+        foreach (KeyValuePair<string, ObjectType> variant in union.Variants)
+        {
+            sb.AppendLine($"    if tag == {ToPythonStringLiteral(variant.Key)}:");
+            sb.AppendLine($"        return {GetSimpleUserTypeName(variant.Value)}.from_dict(data)");
+        }
+
+        sb.AppendLine($"    raise ValueError(f\"Unknown {unionName} {{tag!r}}\")");
     }
 
     private void AppendDefinition(StringBuilder sb, BuiltDefinition definition)

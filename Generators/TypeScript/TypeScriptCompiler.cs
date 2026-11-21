@@ -17,9 +17,18 @@ public class TypeScriptCompiler : Compiler
 
     public bool UsesEffectSchema => _schemaMode is TypeScriptSchemaMode.Effect;
 
+    protected override bool SupportsUnions => true;
+    protected override bool SupportsStringEnums => true;
+    protected override bool SupportsPropertyPresence => true;
+
+    protected override void BuildUnion(BuildContext context, UnionNode unionNode)
+    {
+        context.GetOrAddFile(this, Helpers.FilePathToPascalCase(context.FileNode.FilePath) + ".ts").Unions.Add(unionNode);
+    }
+
     private bool UsesSchemaAtRuntime(BuiltFile file)
     {
-        return file.Definitions.Count > 0 ||
+        return file.Definitions.Count > 0 || file.Unions.Count > 0 ||
                (ClientServiceBuilder is not null && file.Services.Count > 0) ||
                file.Enums.Any(builtEnum => builtEnum.Node.Flags == true);
     }
@@ -61,7 +70,15 @@ public class TypeScriptCompiler : Compiler
             for (var enumValueIdx = 0; enumValueIdx < builtEnum.Values.Count; enumValueIdx++)
             {
                 BuiltEnumValue builtEnumValue = builtEnum.Values[enumValueIdx];
-                sb.Append($"    {builtEnumValue.Label} = {builtEnumValue.Value}");
+                if (builtEnum.Node.IsString)
+                {
+                    string wireValue = builtEnum.Node.WireValues[builtEnumValue.Label];
+                    sb.Append($"    {GetCompiledPropertyKey(builtEnumValue.Label)} = {ToStringLiteral(wireValue)}");
+                }
+                else
+                {
+                    sb.Append($"    {builtEnumValue.Label} = {builtEnumValue.Value}");
+                }
                 if (enumValueIdx < builtEnum.Values.Count - 1)
                     sb.Append(',');
                 sb.AppendLine();
@@ -80,6 +97,8 @@ public class TypeScriptCompiler : Compiler
         else
             CompileClassDefinitions(file, sb);
 
+        CompileUnions(file, sb);
+
         if (ClientServiceBuilder is not null)
             foreach (BuiltService service in file.Services)
                 ClientServiceBuilder.Compile(file, service, sb);
@@ -95,6 +114,13 @@ public class TypeScriptCompiler : Compiler
 
             AppendDescriptionComment(sb, def.Node);
             sb.AppendLine($"export class {def.Name} {{");
+
+            if (def.Node.Union is { } union)
+            {
+                string tag = ToStringLiteral(def.Node.UnionTag!);
+                sb.AppendLine($"    public readonly {GetCompiledPropertyKey(union.Discriminator)}: {tag} = {tag};");
+                sb.AppendLine();
+            }
 
             if (def.Constants.Count > 0)
             {
@@ -119,17 +145,20 @@ public class TypeScriptCompiler : Compiler
             {
                 BuiltProperty property = def.Properties[propertyIdx];
                 bool isOptional = property.Node.BuiltType is IOptionalDataType;
+                PropertyPresence presence = GetPresence(property);
 
                 AppendDescriptionComment(sb, property.Node, 1);
 
                 sb.Append("    public ");
                 sb.Append(property.Name);
-                if (isOptional)
+                if (isOptional && presence is not PropertyPresence.Nullable)
                     sb.Append("?");
-                sb.Append($": {property.Type.Name}");
+                sb.Append($": {(presence is PropertyPresence.Optional ? WithoutNull(property.Type.Name) : property.Type.Name)}");
 
                 if (property.Value is SomeDataValue some && !isOptional)
                     sb.Append($" = {some.Value}");
+                else if (presence is PropertyPresence.Nullable)
+                    sb.Append(" = null");
                 sb.AppendLine(";");
 
                 if (propertyIdx < def.Properties.Count - 1)
@@ -232,13 +261,28 @@ public class TypeScriptCompiler : Compiler
                 ? $"export const {def.Name}: Schema.Schema<{def.Name}> = "
                 : $"export const {def.Name} = ";
 
-            if (def.Properties.Count == 0)
+            List<string> leadingFields = [];
+            if (def.Node.Union is { } union)
+            {
+                leadingFields.Add(
+                    $"    {GetCompiledPropertyKey(union.Discriminator)}: Schema.Literal({ToStringLiteral(def.Node.UnionTag!)})");
+            }
+
+            if (def.Properties.Count == 0 && leadingFields.Count == 0)
             {
                 sb.AppendLine($"{declaration}Schema.Struct({{}});");
             }
             else
             {
                 sb.AppendLine($"{declaration}Schema.Struct({{");
+
+                for (var leadingIdx = 0; leadingIdx < leadingFields.Count; leadingIdx++)
+                {
+                    sb.Append(leadingFields[leadingIdx]);
+                    if (leadingIdx < leadingFields.Count - 1 || def.Properties.Count > 0)
+                        sb.Append(',');
+                    sb.AppendLine();
+                }
 
                 for (var propertyIdx = 0; propertyIdx < def.Properties.Count; propertyIdx++)
                 {
@@ -276,15 +320,20 @@ public class TypeScriptCompiler : Compiler
     {
         sb.AppendLine($"export interface {def.Name} {{");
 
+        if (def.Node.Union is { } union)
+            sb.AppendLine($"    readonly {GetCompiledPropertyKey(union.Discriminator)}: {ToStringLiteral(def.Node.UnionTag!)};");
+
         foreach (BuiltProperty property in def.Properties)
         {
             AppendDescriptionComment(sb, property.Node, 1);
 
             bool isOptional = property.Node.BuiltType is IOptionalDataType;
+            PropertyPresence presence = GetPresence(property);
             sb.Append($"    readonly {GetCompiledPropertyKey(property.Node.Name)}");
-            if (isOptional)
+            if (isOptional && presence is not PropertyPresence.Nullable)
                 sb.Append('?');
-            sb.AppendLine($": {property.Type.Name};");
+            string typeName = presence is PropertyPresence.Optional ? WithoutNull(property.Type.Name) : property.Type.Name;
+            sb.AppendLine($": {typeName};");
         }
 
         sb.AppendLine("}");
@@ -308,6 +357,8 @@ public class TypeScriptCompiler : Compiler
             case MapType mapType:
                 return ReachesDefinition(mapType.InnerTypeA, target, visited) ||
                        ReachesDefinition(mapType.InnerTypeB, target, visited);
+            case UnionType unionType:
+                return unionType.OwnedUnion.Variants.Values.Any(variant => ReachesDefinition(variant, target, visited));
             case ObjectType objectType:
                 DefinitionNode definition = objectType.OwnedDefinition;
                 if (ReferenceEquals(definition, target))
@@ -460,7 +511,14 @@ public class TypeScriptCompiler : Compiler
         string expression = GetSchemaTypeExpression(dataType, deferUserTypes: true);
 
         if (dataType is IOptionalDataType)
-            return $"Schema.optional(Schema.NullOr({expression}))";
+        {
+            return GetPresence(property) switch
+            {
+                PropertyPresence.Optional => $"Schema.optional({expression})",
+                PropertyPresence.Nullable => $"Schema.NullOr({expression})",
+                _ => $"Schema.optional(Schema.NullOr({expression}))"
+            };
+        }
 
         if (property.Node.Value is not null && property.Value is SomeDataValue some)
             return $"Schema.optionalWith({expression}, {{ default: () => {some.Value}, exact: true }})";
@@ -504,9 +562,9 @@ public class TypeScriptCompiler : Compiler
                 return enumType.OwnedEnum.Flags == true
                     ? $"{enumName}Schema"
                     : $"Schema.Enums({enumName})";
-            case ObjectType objectType:
+            case ObjectType or UnionType:
                 // Definition order must not matter, and definitions may be recursive.
-                string reference = GetSimpleUserTypeName(objectType);
+                string reference = GetSimpleUserTypeName((IUserDataType)dataType);
                 return deferUserTypes ? $"Schema.suspend(() => {reference})" : reference;
             default:
                 throw new ArgumentOutOfRangeException(nameof(dataType));
@@ -553,9 +611,17 @@ public class TypeScriptCompiler : Compiler
 
         if (node is PropertyNode propertyNode)
         {
+            // Say how an optional value behaves only when the description doesn't already.
             bool isOptional = propertyNode.BuiltType is IOptionalDataType;
-            if (isOptional)
-                metadataLines.Add("Optional property.");
+            if (isOptional && descriptionLines.Count == 0)
+            {
+                metadataLines.Add(propertyNode.Presence switch
+                {
+                    PropertyPresence.Optional => "May be absent; never null.",
+                    PropertyPresence.Nullable => "Always present; may be null.",
+                    _ => "Optional property."
+                });
+            }
 
             if (propertyNode.Validation is { } validation)
             {
@@ -617,6 +683,11 @@ public class TypeScriptCompiler : Compiler
             foreach (BuiltDefinition def in file.Definitions)
             foreach (BuiltConstant constant in def.Constants)
                 CollectImportsForPropertyType(file, constant.Node.BuiltType!, map, includeSchemaSymbols: false);
+
+        // Union variants may live in other files.
+        foreach (UnionNode union in file.Unions)
+        foreach (ObjectType variant in union.Variants.Values)
+            CollectImportsForPropertyType(file, variant, map, includeSchemaSymbols: false);
 
         // Collect from services
         foreach (BuiltService service in file.Services)
@@ -690,8 +761,50 @@ public class TypeScriptCompiler : Compiler
         {
             return EnumBuilder.GetBuiltFileName(new BuildContext(en.OwnedFile, []), en.OwnedEnum);
         }
+        if (userType is UnionType union)
+        {
+            return Helpers.FilePathToPascalCase(union.OwnedFile.FilePath) + ".ts";
+        }
         // Fallback shouldn't happen
         return string.Empty;
+    }
+
+    private void CompileUnions(BuiltFile file, StringBuilder sb)
+    {
+        foreach (UnionNode union in file.Unions)
+        {
+            string unionName = union.Name.ToPascalCase();
+            List<string> variantNames = union.Variants.Values.Select(GetSimpleUserTypeName).ToList();
+
+            sb.AppendLine();
+            AppendDescriptionComment(sb, union);
+
+            if (UsesEffectSchema)
+            {
+                sb.AppendLine($"export const {unionName} = Schema.Union({string.Join(", ", variantNames)});");
+                sb.AppendLine();
+                sb.AppendLine($"export type {unionName} = typeof {unionName}.Type;");
+            }
+            else
+            {
+                sb.AppendLine($"export type {unionName} = {string.Join(" | ", variantNames)};");
+            }
+        }
+    }
+
+    private static PropertyPresence GetPresence(BuiltProperty property)
+    {
+        return property.Node is PropertyNode propertyNode ? propertyNode.Presence : PropertyPresence.Default;
+    }
+
+    private static string WithoutNull(string typeName)
+    {
+        return typeName.EndsWith(" | null", StringComparison.Ordinal) ? typeName[..^" | null".Length] : typeName;
+    }
+
+    private static string ToStringLiteral(string value)
+    {
+        return $"\"{value.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"";
     }
 
     private string ComputeRelativeImportPath(string fromFile, string toFile)

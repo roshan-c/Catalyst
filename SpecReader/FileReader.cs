@@ -76,6 +76,7 @@ public class FileReader
         ReadFileCompilerOptions(rawFileNode, fileNode);
         ReadEnums(rawFileNode, fileNode);
         ReadDefinitions(rawFileNode, fileNode);
+        ReadUnions(rawFileNode, fileNode);
         ReadServices(rawFileNode, fileNode);
         
         return fileNode;
@@ -189,6 +190,27 @@ public class FileReader
                 RawNode = enumRawNode,
                 TokenName = "values"
             };
+        }
+
+        string? enumWireType = enumRawNode.ReadPropertyAsStr("type");
+        if (enumWireType is not null)
+        {
+            if (!enumWireType.Equals("str", StringComparison.OrdinalIgnoreCase) &&
+                !enumWireType.Equals("int", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new UnexpectedTokenException
+                {
+                    RawNode = enumRawNode,
+                    LeafName = "type",
+                    TokenName = $"{enumWireType} (expected 'str' or 'int')"
+                };
+            }
+
+            if (enumWireType.Equals("str", StringComparison.OrdinalIgnoreCase))
+            {
+                ReadStringEnumValues(fileNode, enumName, enumRawNode, enumNode, enumValues);
+                return;
+            }
         }
         
         Logger.LogDebug("Found {Count} values in enum {EnumFullName}", enumValues.Count, enumNode.FullName);
@@ -350,6 +372,140 @@ public class FileReader
         fileNode.Enums.Add(enumName, enumNode);
     }
     
+    void ReadStringEnumValues(FileNode fileNode, string enumName, RawNode enumRawNode, EnumNode enumNode, List<object> enumValues)
+    {
+        // String enums carry their own wire value, so flags (bitwise combinations) make no sense.
+        if (enumNode.Flags == true)
+        {
+            throw new UnexpectedTokenException
+            {
+                RawNode = enumRawNode,
+                LeafName = enumName,
+                TokenName = "flags (a string enum cannot be a flags enum)"
+            };
+        }
+
+        enumNode.IsString = true;
+        enumNode.Flags = false;
+
+        for (var valueIdx = 0; valueIdx < enumValues.Count; valueIdx++)
+        {
+            string label;
+            string wireValue;
+
+            switch (enumValues[valueIdx])
+            {
+                case string valueStr:
+                    // A bare value is both the label and what goes on the wire.
+                    label = valueStr;
+                    wireValue = valueStr;
+                    break;
+                case Dictionary<object, object> map when map.Count == 1 &&
+                                                          map.First().Key is string mapLabel &&
+                                                          map.First().Value is string mapWireValue:
+                    label = mapLabel;
+                    wireValue = mapWireValue;
+                    break;
+                default:
+                    throw new UnexpectedTypeException
+                    {
+                        RawNode = enumRawNode,
+                        LeafName = enumName,
+                        ExpectedType = "string or 'Label: wire-value'",
+                        ReceivedType = enumValues[valueIdx].GetType().Name
+                    };
+            }
+
+            if (enumNode.WireValues.ContainsValue(wireValue) || !enumNode.Values.TryAdd(label, valueIdx))
+            {
+                throw new ExistingEnumValueFoundException
+                {
+                    RawNode = enumRawNode,
+                    LeafName = enumName,
+                    EnumValueLabel = label
+                };
+            }
+
+            enumNode.WireValues[label] = wireValue;
+        }
+
+        fileNode.Enums.Add(enumName, enumNode);
+    }
+
+    void ReadUnions(RawFileNode rawFileNode, FileNode fileNode)
+    {
+        Dictionary<object, object>? unions = rawFileNode.ReadPropertyAsDictionary("unions");
+        if (unions is null)
+            return;
+
+        Logger.LogInformation("Found {Count} unions in {FilePath}", unions.Count, fileNode.FullName);
+
+        RawNode unionsRawNode = rawFileNode.CreateChild(unions, "unions");
+
+        foreach (KeyValuePair<object, object> unionKeyValue in unions)
+        {
+            string unionName = (string)unionKeyValue.Key;
+            if (unionKeyValue.Value is not Dictionary<object, object> unionObject)
+            {
+                throw new UnexpectedTypeException
+                {
+                    RawNode = unionsRawNode,
+                    LeafName = unionName,
+                    ExpectedType = nameof(Dictionary<object, object>),
+                    ReceivedType = unionKeyValue.Value.GetType().Name
+                };
+            }
+
+            RawNode unionRawNode = unionsRawNode.CreateChild(unionObject, unionName);
+
+            string? discriminator = unionRawNode.ReadPropertyAsStr("discriminator");
+            if (string.IsNullOrWhiteSpace(discriminator))
+            {
+                throw new ExpectedTokenNotFoundException
+                {
+                    RawNode = unionRawNode,
+                    TokenName = "discriminator"
+                };
+            }
+
+            Dictionary<object, object>? variants = unionRawNode.ReadPropertyAsDictionary("variants");
+            if (variants is null || variants.Count == 0)
+            {
+                throw new ExpectedTokenNotFoundException
+                {
+                    RawNode = unionRawNode,
+                    TokenName = "variants"
+                };
+            }
+
+            UnionNode unionNode = new()
+            {
+                Parent = new WeakReference<Node>(fileNode),
+                Name = unionName,
+                Description = (unionRawNode.ReadPropertyAsStr("description") ?? unionRawNode.ReadPropertyAsStr("desc"))?.TrimEnd(),
+                Discriminator = discriminator
+            };
+
+            foreach (KeyValuePair<object, object> variant in variants)
+            {
+                if (variant.Key is not string tag || variant.Value is not string definitionName)
+                {
+                    throw new UnexpectedTypeException
+                    {
+                        RawNode = unionRawNode,
+                        LeafName = "variants",
+                        ExpectedType = "'tag: DefinitionName'",
+                        ReceivedType = variant.Value.GetType().Name
+                    };
+                }
+
+                unionNode.UnBuiltVariants[tag] = definitionName.Replace(" ", string.Empty);
+            }
+
+            fileNode.Unions.Add(unionName, unionNode);
+        }
+    }
+
     void ReadDefinitions(RawFileNode rawFileNode, FileNode fileNode)
     {
         Logger.LogDebug("Reading definitions in {FilePath}", fileNode.FullName);
@@ -498,12 +654,43 @@ public class FileReader
             UnBuiltType = propertyType,
             Description = (propertyRawNode.ReadPropertyAsStr("description") ?? propertyRawNode.ReadPropertyAsStr("desc"))?.TrimEnd(),
             Value = unBuiltValue,
-            Validation = ReadValidationAttributes(propertyRawNode, propertyType)
+            Validation = ReadValidationAttributes(propertyRawNode, propertyType),
+            Presence = ReadPropertyPresence(propertyRawNode, propertyType)
         };
         
         ReadPropertyCompilerOptions(definitionNode, propertyRawNode, propertyNode);
         
         definitionNode.Properties.Add(propertyName, propertyNode);
+    }
+
+    PropertyPresence ReadPropertyPresence(RawNode propertyRawNode, string propertyType)
+    {
+        string? presence = propertyRawNode.ReadPropertyAsStr("presence");
+        if (presence is null)
+            return PropertyPresence.Default;
+
+        // Presence only refines how an optional value is written, so it needs an optional type.
+        if (!propertyType.EndsWith('?'))
+        {
+            throw new UnexpectedTokenException
+            {
+                RawNode = propertyRawNode,
+                LeafName = "presence",
+                TokenName = $"{presence} (presence needs an optional type such as '{propertyType}?')"
+            };
+        }
+
+        return presence.ToLowerInvariant() switch
+        {
+            "optional" => PropertyPresence.Optional,
+            "nullable" => PropertyPresence.Nullable,
+            _ => throw new UnexpectedTokenException
+            {
+                RawNode = propertyRawNode,
+                LeafName = "presence",
+                TokenName = $"{presence} (expected 'optional' or 'nullable')"
+            }
+        };
     }
 
     ValidationAttributes? ReadValidationAttributes(RawNode propertyRawNode, string propertyType)

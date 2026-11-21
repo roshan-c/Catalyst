@@ -66,6 +66,7 @@ public class Graph
         
         RegisterFileEnums(fileNode);
         RegisterFileDefinitions(fileNode);
+        RegisterFileUnions(fileNode);
         RegisterFileServices(fileNode);
         
         Files.Add(fileNode);
@@ -78,6 +79,9 @@ public class Graph
         
         Logger.LogInformation("Building spec graph...");
         
+        // Every definition is registered now, so union variants can be resolved.
+        BuildUnions();
+
         // All definitions have been added at this point. It's safe to register container property types now.
         BuildContainerPropertyTypes();
         
@@ -759,6 +763,83 @@ public class Graph
         }
     }
     
+    void RegisterFileUnions(FileNode fileNode)
+    {
+        foreach (KeyValuePair<string, UnionNode> unionPair in fileNode.Unions)
+        {
+            string unionName = string.IsNullOrEmpty(fileNode.Namespace)
+                ? unionPair.Key
+                : $"{fileNode.Namespace}.{unionPair.Key}";
+
+            UnionType newUnionPropertyType = new()
+            {
+                Name = unionName,
+                Namespace = fileNode.Namespace,
+                OwnedUnion = unionPair.Value,
+                OwnedFile = fileNode
+            };
+
+            IDataType? existingPropertyType = PropertyTypes.FirstOrDefault(x =>
+                string.Equals(x.Name, unionName, StringComparison.CurrentCultureIgnoreCase));
+
+            if (existingPropertyType is not null)
+            {
+                throw new DataTypeAlreadyExistsException
+                {
+                    ExistingDataType = existingPropertyType,
+                    NewDataType = newUnionPropertyType
+                };
+            }
+
+            OptionalUnionType newOptionalUnionPropertyType = new()
+            {
+                Name = $"{unionName}?",
+                Namespace = fileNode.Namespace,
+                OwnedUnion = unionPair.Value,
+                OwnedFile = fileNode
+            };
+
+            PropertyTypes.AddRange([newUnionPropertyType, newOptionalUnionPropertyType]);
+        }
+    }
+
+    void BuildUnions()
+    {
+        foreach (FileNode file in Files)
+        foreach (KeyValuePair<string, UnionNode> unionPair in file.Unions)
+        {
+            UnionNode union = unionPair.Value;
+
+            foreach (KeyValuePair<string, string> variant in union.UnBuiltVariants)
+            {
+                IDataType? variantType = FindPropertyType(variant.Value, file.Namespace);
+                if (variantType is not ObjectType objectType || variantType is IOptionalDataType)
+                {
+                    throw new InvalidOperationException(
+                        $"Union '{union.FullName}' variant '{variant.Key}' must name a definition, but '{variant.Value}' is not one.");
+                }
+
+                DefinitionNode definition = objectType.OwnedDefinition;
+                if (definition.Union is not null)
+                {
+                    throw new InvalidOperationException(
+                        $"Definition '{definition.FullName}' is a variant of both '{definition.Union.FullName}' and '{union.FullName}'. A definition can belong to one union.");
+                }
+
+                // The union writes the discriminator itself, so a variant must not declare it too.
+                if (definition.Properties.ContainsKey(union.Discriminator))
+                {
+                    throw new InvalidOperationException(
+                        $"Definition '{definition.FullName}' declares '{union.Discriminator}', which is the discriminator of union '{union.FullName}'. Remove the property; the union writes it.");
+                }
+
+                definition.Union = union;
+                definition.UnionTag = variant.Key;
+                union.Variants[variant.Key] = objectType;
+            }
+        }
+    }
+
     void RegisterFileServices(FileNode fileNode)
     {
         foreach (KeyValuePair<string, ServiceNode> servicePair in fileNode.Services)
