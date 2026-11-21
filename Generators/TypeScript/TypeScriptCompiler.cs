@@ -8,8 +8,20 @@ public class TypeScriptCompiler : Compiler
 {
     public override string Name => TypeScript.Name;
 
+    private readonly TypeScriptSchemaMode _schemaMode;
+
     public TypeScriptCompiler(CompilerOptions options) : base(options)
     {
+        _schemaMode = TypeScriptSchemaModeParser.Parse(options.TypeScriptSchema);
+    }
+
+    public bool UsesEffectSchema => _schemaMode is TypeScriptSchemaMode.Effect;
+
+    private bool UsesSchemaAtRuntime(BuiltFile file)
+    {
+        return file.Definitions.Count > 0 ||
+               (ClientServiceBuilder is not null && file.Services.Count > 0) ||
+               file.Enums.Any(builtEnum => builtEnum.Node.Flags == true);
     }
 
     public override CompiledFile Compile(BuiltFile file)
@@ -22,6 +34,13 @@ public class TypeScriptCompiler : Compiler
         sb.AppendLine("//");
         sb.AppendLine();
 
+        bool wroteImport = false;
+        if (UsesEffectSchema && UsesSchemaAtRuntime(file))
+        {
+            sb.AppendLine("import { Schema } from 'effect';");
+            wroteImport = true;
+        }
+
         // Emit imports for referenced user-defined types across files
         var importMap = BuildTypeScriptImportMap(file);
         foreach (var import in importMap.OrderBy(kvp => kvp.Key))
@@ -29,8 +48,9 @@ public class TypeScriptCompiler : Compiler
             string importPath = ComputeRelativeImportPath(file.Name, import.Key);
             string symbols = string.Join(", ", import.Value.OrderBy(x => x));
             sb.AppendLine($"import {{ {symbols} }} from '{importPath}';");
+            wroteImport = true;
         }
-        if (importMap.Count > 0)
+        if (wroteImport)
             sb.AppendLine();
 
         foreach (var builtEnum in file.Enums)
@@ -48,9 +68,27 @@ public class TypeScriptCompiler : Compiler
             }
 
             sb.AppendLine("}");
+
+            if (UsesEffectSchema && builtEnum.Node.Flags == true)
+                AppendEffectFlagsEnumSchema(sb, builtEnum);
+
             sb.AppendLine();
         }
 
+        if (UsesEffectSchema)
+            CompileEffectDefinitions(file, sb);
+        else
+            CompileClassDefinitions(file, sb);
+
+        if (ClientServiceBuilder is not null)
+            foreach (BuiltService service in file.Services)
+                ClientServiceBuilder.Compile(file, service, sb);
+
+        return new CompiledFile(file.Name, sb.ToString());
+    }
+
+    private void CompileClassDefinitions(BuiltFile file, StringBuilder sb)
+    {
         for (var defIdx = 0; defIdx < file.Definitions.Count; defIdx++)
         {
             BuiltDefinition def = file.Definitions[defIdx];
@@ -156,12 +194,151 @@ public class TypeScriptCompiler : Compiler
             if (defIdx < file.Definitions.Count - 1)
                 sb.AppendLine();
         }
+    }
 
-        if (ClientServiceBuilder is not null)
-            foreach (BuiltService service in file.Services)
-                ClientServiceBuilder.Compile(file, service, sb);
+    private static void AppendEffectFlagsEnumSchema(StringBuilder sb, BuiltEnum builtEnum)
+    {
+        // Schema.Enums only accepts the declared members, but a flags enum can hold any
+        // combination of its bits (and often -1 for 'all'). Validate the bits instead.
+        int mask = 0;
+        foreach (BuiltEnumValue value in builtEnum.Values)
+        {
+            if (value.Value >= 0)
+                mask |= value.Value;
+        }
 
-        return new CompiledFile(file.Name, sb.ToString());
+        sb.AppendLine();
+        sb.AppendLine($"export const {builtEnum.Name}Schema = Schema.Int.pipe(");
+        sb.AppendLine($"    Schema.filter((value): value is {builtEnum.Name} => value === -1 || (value & ~{mask}) === 0)");
+        sb.AppendLine(");");
+    }
+
+    private void CompileEffectDefinitions(BuiltFile file, StringBuilder sb)
+    {
+        for (var defIdx = 0; defIdx < file.Definitions.Count; defIdx++)
+        {
+            BuiltDefinition def = file.Definitions[defIdx];
+            bool isRecursive = IsRecursiveDefinition(def);
+
+            AppendDescriptionComment(sb, def.Node);
+
+            if (isRecursive)
+            {
+                // A recursive schema cannot infer its own type, so give it an explicit interface.
+                AppendEffectInterface(sb, def);
+            }
+
+            string declaration = isRecursive
+                ? $"export const {def.Name}: Schema.Schema<{def.Name}> = "
+                : $"export const {def.Name} = ";
+
+            if (def.Properties.Count == 0)
+            {
+                sb.AppendLine($"{declaration}Schema.Struct({{}});");
+            }
+            else
+            {
+                sb.AppendLine($"{declaration}Schema.Struct({{");
+
+                for (var propertyIdx = 0; propertyIdx < def.Properties.Count; propertyIdx++)
+                {
+                    BuiltProperty property = def.Properties[propertyIdx];
+
+                    AppendDescriptionComment(sb, property.Node, 1);
+
+                    sb.Append($"    {GetCompiledPropertyKey(property.Node.Name)}: {GetSchemaPropertyExpression(property)}");
+                    if (propertyIdx < def.Properties.Count - 1)
+                        sb.Append(',');
+                    sb.AppendLine();
+                }
+
+                sb.AppendLine("});");
+            }
+
+            if (!isRecursive)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"export type {def.Name} = typeof {def.Name}.Type;");
+            }
+
+            if (def.Constants.Count > 0)
+            {
+                sb.AppendLine();
+                AppendEffectConstants(sb, def);
+            }
+
+            if (defIdx < file.Definitions.Count - 1)
+                sb.AppendLine();
+        }
+    }
+
+    private void AppendEffectInterface(StringBuilder sb, BuiltDefinition def)
+    {
+        sb.AppendLine($"export interface {def.Name} {{");
+
+        foreach (BuiltProperty property in def.Properties)
+        {
+            AppendDescriptionComment(sb, property.Node, 1);
+
+            bool isOptional = property.Node.BuiltType is IOptionalDataType;
+            sb.Append($"    readonly {GetCompiledPropertyKey(property.Node.Name)}");
+            if (isOptional)
+                sb.Append('?');
+            sb.AppendLine($": {property.Type.Name};");
+        }
+
+        sb.AppendLine("}");
+        sb.AppendLine();
+    }
+
+    private static bool IsRecursiveDefinition(BuiltDefinition definition)
+    {
+        return definition.Properties.Any(property =>
+            ReachesDefinition(property.Node.BuiltType!, definition.Node, new HashSet<DefinitionNode>()));
+    }
+
+    private static bool ReachesDefinition(IDataType dataType, DefinitionNode target, HashSet<DefinitionNode> visited)
+    {
+        switch (dataType)
+        {
+            case ListType listType:
+                return ReachesDefinition(listType.InnerType, target, visited);
+            case SetType setType:
+                return ReachesDefinition(setType.InnerType, target, visited);
+            case MapType mapType:
+                return ReachesDefinition(mapType.InnerTypeA, target, visited) ||
+                       ReachesDefinition(mapType.InnerTypeB, target, visited);
+            case ObjectType objectType:
+                DefinitionNode definition = objectType.OwnedDefinition;
+                if (ReferenceEquals(definition, target))
+                    return true;
+                if (!visited.Add(definition))
+                    return false;
+                return definition.Properties.Any(property =>
+                    ReachesDefinition(property.Value.BuiltType!, target, visited));
+            default:
+                return false;
+        }
+    }
+
+    private void AppendEffectConstants(StringBuilder sb, BuiltDefinition def)
+    {
+        sb.AppendLine($"export const {def.Name}Constants = {{");
+
+        for (var constantIdx = 0; constantIdx < def.Constants.Count; constantIdx++)
+        {
+            BuiltConstant constant = def.Constants[constantIdx];
+
+            AppendDescriptionComment(sb, constant.Node, 1);
+
+            string value = constant.Value.Value ?? "undefined";
+            sb.Append($"    {GetCompiledPropertyKey(constant.Name)}: {value}");
+            if (constantIdx < def.Constants.Count - 1)
+                sb.Append(',');
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("} as const;");
     }
 
     public override BuiltInclude? GetCompiledIncludeForType(BuiltFile file, IDataType dataType)
@@ -194,16 +371,24 @@ public class TypeScriptCompiler : Compiler
                 break;
             case ListType listType:
                 BuiltDataType innerListPropertyType = GetCompiledDataType(listType.InnerType);
-                genPropertyType = new BuiltDataType($"Array<{innerListPropertyType.Name}>");
+                genPropertyType = new BuiltDataType($"{GetArrayTypeName()}<{innerListPropertyType.Name}>");
                 break;
             case MapType mapType:
-                BuiltDataType innerKeyPropertyType = GetCompiledDataType(mapType.InnerTypeA);
                 BuiltDataType innerValuePropertyType = GetCompiledDataType(mapType.InnerTypeB);
-                genPropertyType = new BuiltDataType($"Record<{innerKeyPropertyType.Name}, {innerValuePropertyType.Name}>");
+                if (UsesEffectSchema)
+                {
+                    // JSON object keys are strings, so Effect's Record key schema is always a string.
+                    genPropertyType = new BuiltDataType($"Record<string, {innerValuePropertyType.Name}>");
+                }
+                else
+                {
+                    BuiltDataType innerKeyPropertyType = GetCompiledDataType(mapType.InnerTypeA);
+                    genPropertyType = new BuiltDataType($"Record<{innerKeyPropertyType.Name}, {innerValuePropertyType.Name}>");
+                }
                 break;
             case SetType setType:
                 BuiltDataType innerSetPropertyType = GetCompiledDataType(setType.InnerType);
-                genPropertyType = new BuiltDataType($"Array<{innerSetPropertyType.Name}>");
+                genPropertyType = new BuiltDataType($"{GetArrayTypeName()}<{innerSetPropertyType.Name}>");
                 break;
             case StringType:
                 genPropertyType = new BuiltDataType("string");
@@ -247,6 +432,115 @@ public class TypeScriptCompiler : Compiler
     public override string GetCompiledClassName(string className)
     {
         return className.ToPascalCase();
+    }
+
+    private string GetArrayTypeName()
+    {
+        return UsesEffectSchema ? "ReadonlyArray" : "Array";
+    }
+
+    /// <summary>
+    /// Builds the Effect Schema expression for a value, such as a list element or an
+    /// endpoint request/response. Optional types become <c>NullOr</c> rather than an
+    /// optional property, because there is no object key to omit.
+    /// </summary>
+    public string GetSchemaValueExpression(IDataType dataType)
+    {
+        // Endpoint types always come from another generated file, so direct references
+        // are safe and avoid an unnecessary Schema.suspend wrapper.
+        string expression = GetSchemaTypeExpression(dataType, deferUserTypes: false);
+        if (dataType is IOptionalDataType)
+            expression = $"Schema.NullOr({expression})";
+        return expression;
+    }
+
+    private string GetSchemaPropertyExpression(BuiltProperty property)
+    {
+        IDataType dataType = property.Node.BuiltType!;
+        string expression = GetSchemaTypeExpression(dataType, deferUserTypes: true);
+
+        if (dataType is IOptionalDataType)
+            return $"Schema.optional(Schema.NullOr({expression}))";
+
+        if (property.Node.Value is not null && property.Value is SomeDataValue some)
+            return $"Schema.optionalWith({expression}, {{ default: () => {some.Value}, exact: true }})";
+
+        return expression;
+    }
+
+    private string GetSchemaTypeExpression(IDataType dataType, bool deferUserTypes)
+    {
+        switch (dataType)
+        {
+            case AnyType:
+                return "Schema.Any";
+            case BooleanType:
+                return "Schema.Boolean";
+            case DateType:
+                // Dates stay ISO 8601 strings, the same wire format the class output uses.
+                return "Schema.String";
+            case FloatType:
+                return "Schema.Number";
+            case IntegerType:
+                return "Schema.Int";
+            case Integer64Type:
+                return "Schema.BigIntFromNumber";
+            case ListType listType:
+                return $"Schema.Array({GetSchemaValueExpression(listType.InnerType, deferUserTypes)})";
+            case MapType mapType:
+                return $"Schema.Record({{ key: Schema.String, value: {GetSchemaValueExpression(mapType.InnerTypeB, deferUserTypes)} }})";
+            case SetType setType:
+                return $"Schema.Array({GetSchemaValueExpression(setType.InnerType, deferUserTypes)})";
+            case StringType:
+                return "Schema.String";
+            case TimeType:
+                return "Schema.Number";
+            case UuidType:
+                return "Schema.UUID";
+            case UrlType:
+                return "Schema.String";
+            case EnumType enumType:
+                string enumName = GetSimpleUserTypeName(enumType);
+                return enumType.OwnedEnum.Flags == true
+                    ? $"{enumName}Schema"
+                    : $"Schema.Enums({enumName})";
+            case ObjectType objectType:
+                // Definition order must not matter, and definitions may be recursive.
+                string reference = GetSimpleUserTypeName(objectType);
+                return deferUserTypes ? $"Schema.suspend(() => {reference})" : reference;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(dataType));
+        }
+    }
+
+    private string GetSchemaValueExpression(IDataType dataType, bool deferUserTypes)
+    {
+        string expression = GetSchemaTypeExpression(dataType, deferUserTypes);
+        if (dataType is IOptionalDataType)
+            expression = $"Schema.NullOr({expression})";
+        return expression;
+    }
+
+    private static string GetCompiledPropertyKey(string name)
+    {
+        if (name.Length > 0 && (char.IsLetter(name[0]) || name[0] is '_' or '$'))
+        {
+            bool isValid = true;
+            for (var nameIdx = 1; nameIdx < name.Length; nameIdx++)
+            {
+                char character = name[nameIdx];
+                if (!char.IsLetterOrDigit(character) && character is not '_' and not '$')
+                {
+                    isValid = false;
+                    break;
+                }
+            }
+
+            if (isValid)
+                return name;
+        }
+
+        return $"'{name.Replace("\\", "\\\\").Replace("'", "\\'")}'";
     }
 
     public StringBuilder AppendDescriptionComment(StringBuilder sb, INodeDescription node, int indentation = 0)
@@ -317,6 +611,13 @@ public class TypeScriptCompiler : Compiler
         foreach (BuiltProperty prop in def.Properties)
             CollectImportsForPropertyType(file, prop.Node.BuiltType!, map);
 
+        // Constants are emitted as values in Effect Schema mode, so their types must be imported too.
+        // They only need the enum/definition symbol, not a generated flags schema const.
+        if (UsesEffectSchema)
+            foreach (BuiltDefinition def in file.Definitions)
+            foreach (BuiltConstant constant in def.Constants)
+                CollectImportsForPropertyType(file, constant.Node.BuiltType!, map, includeSchemaSymbols: false);
+
         // Collect from services
         foreach (BuiltService service in file.Services)
         foreach (BuiltEndpoint endpoint in service.Endpoints)
@@ -328,19 +629,23 @@ public class TypeScriptCompiler : Compiler
         return map;
     }
 
-    private void CollectImportsForPropertyType(BuiltFile currentFile, IDataType type, Dictionary<string, HashSet<string>> map)
+    private void CollectImportsForPropertyType(
+        BuiltFile currentFile,
+        IDataType type,
+        Dictionary<string, HashSet<string>> map,
+        bool includeSchemaSymbols = true)
     {
         switch (type)
         {
             case ListType listType:
-                CollectImportsForPropertyType(currentFile, listType.InnerType, map);
+                CollectImportsForPropertyType(currentFile, listType.InnerType, map, includeSchemaSymbols);
                 break;
             case SetType setType:
-                CollectImportsForPropertyType(currentFile, setType.InnerType, map);
+                CollectImportsForPropertyType(currentFile, setType.InnerType, map, includeSchemaSymbols);
                 break;
             case MapType mapType:
-                CollectImportsForPropertyType(currentFile, mapType.InnerTypeA, map);
-                CollectImportsForPropertyType(currentFile, mapType.InnerTypeB, map);
+                CollectImportsForPropertyType(currentFile, mapType.InnerTypeA, map, includeSchemaSymbols);
+                CollectImportsForPropertyType(currentFile, mapType.InnerTypeB, map, includeSchemaSymbols);
                 break;
             case IUserDataType userType:
             {
@@ -356,6 +661,9 @@ public class TypeScriptCompiler : Compiler
                     map[targetFile] = symbols;
                 }
                 symbols.Add(symbol);
+
+                if (includeSchemaSymbols && UsesEffectSchema && userType is EnumType { OwnedEnum.Flags: true })
+                    symbols.Add($"{symbol}Schema");
                 break;
             }
         }

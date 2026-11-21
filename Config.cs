@@ -18,4 +18,5 @@ public class Config
     public string? ClientBuilder { get; set; } = Builder.Default;
     public string? ServerBuilder { get; set; } = Builder.Default;
     public string? ValidatorBuilder { get; set; } = Builder.Default;
+    public string? TsSchema { get; set; } = "class";
 }

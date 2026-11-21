@@ -39,7 +39,8 @@ CompilerOptions compilerOptions = new(
     DefinitionBuilderName: config.DefinitionBuilder,
     ClientServiceBuilderName: config.ClientBuilder,
     ServerServiceBuilderName: config.ServerBuilder,
-    ValidatorBuilderName: config.ValidatorBuilder);
+    ValidatorBuilderName: config.ValidatorBuilder,
+    TypeScriptSchema: config.TsSchema);
 
 FileInfo[] inputFiles = GetInputFiles();
 
