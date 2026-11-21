@@ -11,7 +11,8 @@ public record CompilerOptions(
     string DefinitionBuilderName, 
     string? ClientServiceBuilderName, 
     string? ServerServiceBuilderName,
-    string? ValidatorBuilderName);
+    string? ValidatorBuilderName,
+    string? TypeScriptSchema = null);
 
 public abstract class Compiler
 {
