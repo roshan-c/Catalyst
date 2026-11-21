@@ -30,5 +30,45 @@ jobs:
     - name: Test TypeScript
       run: dotnet run --project . --Language=ts --BaseInputDir=./TestData --BaseOutputDir=./output/ts
 
+    - name: Test TypeScript (Effect Schema)
+      run: dotnet run --project . --Language=ts --TsSchema=effect --BaseInputDir=./TestData --BaseOutputDir=./output/ts-effect
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22.x
+
+    - name: Type-check TypeScript (Effect Schema)
+      working-directory: ./output/ts-effect
+      run: |
+        npm init -y
+        npm install --no-save effect@3.22.4 typescript@5.9.3
+        ./node_modules/.bin/tsc --noEmit --strict --target ES2020 --module commonjs --moduleResolution node $(find . -name '*.ts' -not -path './node_modules/*')
+
+    - name: Check TypeScript (Effect Schema) decoding
+      working-directory: ./output/ts-effect
+      run: |
+        ./node_modules/.bin/tsc --strict --target ES2020 --module commonjs --moduleResolution node --outDir dist $(find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*')
+        cat > check.cjs <<'EOF'
+        const { Schema } = require("effect");
+        const { EnumContainer } = require("./dist/Enums.js");
+
+        const decoded = Schema.decodeUnknownSync(EnumContainer)({ productType: 1 });
+        if (decoded.productType !== 1 || decoded.userRole !== 5 || decoded.windowOptions !== 5) {
+          throw new Error("decoded defaults do not match: " + JSON.stringify(decoded));
+        }
+
+        let threw = false;
+        try {
+          Schema.decodeUnknownSync(EnumContainer)({ productType: "not-an-enum" });
+        } catch {
+          threw = true;
+        }
+        if (!threw) throw new Error("invalid payload was accepted");
+
+        console.log("Effect Schema decoding check passed");
+        EOF
+        node check.cjs
+
     - name: Test Unreal
       run: dotnet run --project . --Language=unreal --BaseInputDir=./TestData --BaseOutputDir=./output/unreal

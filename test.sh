@@ -18,6 +18,11 @@ dotnet run -- --Language=ts --BaseInputDir=./TestData --BaseOutputDir=./output/t
 echo "TypeScript - OK"
 
 echo ""
+echo "Testing TypeScript (Effect Schema)..."
+dotnet run -- --Language=ts --TsSchema=effect --BaseInputDir=./TestData --BaseOutputDir=./output/ts-effect
+echo "TypeScript (Effect Schema) - OK"
+
+echo ""
 echo "Testing Unreal..."
 dotnet run -- --Language=unreal --BaseInputDir=./TestData --BaseOutputDir=./output/unreal
 echo "Unreal - OK"
