@@ -57,20 +57,46 @@ public class TypeScriptClientServiceBuilder : IClientServiceBuilder<TypeScriptCo
             fileStr
                 .AppendLine($"    /** {endpoint.Node.Description} */")
                 .AppendLine($"    public async {endpoint.Name}(request: {endpoint.RequestType.Name}): Promise<{endpoint.ResponseType.Name}> {{")
-                .AppendLine("        const url = this.options.baseUrl + \"" + service.Node.Path + "\" + \"" + endpoint.Node.Path + "\";")
-                .AppendLine("        const bodyBytes = new TextEncoder().encode(JSON.stringify(request));")
-                .AppendLine("        const res = await fetch(url, { method: '" + endpoint.Node.Method.ToString().ToUpper() + "', headers: { 'Content-Type': 'application/json; charset=utf-8' }, body: bodyBytes } as RequestInit);")
-                .AppendLine("        if (!res.ok) throw new Error('HTTP ' + res.status);")
-                .AppendLine("        const bytes = new Uint8Array(await res.arrayBuffer());")
-                .AppendLine("        const json = new TextDecoder().decode(bytes);")
-                .AppendLine($"        return JSON.parse(json) as {endpoint.ResponseType.Name};")
-                .AppendLine("    }");
+                .AppendLine("        const url = this.options.baseUrl + \"" + service.Node.Path + "\" + \"" + endpoint.Node.Path + "\";");
+
+            if (Compiler.UsesEffectSchema)
+                AppendEffectSchemaBody(fileStr, endpoint);
+            else
+                AppendClassBody(fileStr, endpoint);
+
+            fileStr.AppendLine("    }");
 
             if (endpointIndex < service.Endpoints.Count - 1)
                 fileStr.AppendLine();
         }
 
         fileStr.AppendLine("}");
+    }
+
+    private void AppendClassBody(StringBuilder fileStr, BuiltEndpoint endpoint)
+    {
+        fileStr
+            .AppendLine("        const bodyBytes = new TextEncoder().encode(JSON.stringify(request));")
+            .AppendLine("        const res = await fetch(url, { method: '" + endpoint.Node.Method.ToString().ToUpper() + "', headers: { 'Content-Type': 'application/json; charset=utf-8' }, body: bodyBytes } as RequestInit);")
+            .AppendLine("        if (!res.ok) throw new Error('HTTP ' + res.status);")
+            .AppendLine("        const bytes = new Uint8Array(await res.arrayBuffer());")
+            .AppendLine("        const json = new TextDecoder().decode(bytes);")
+            .AppendLine($"        return JSON.parse(json) as {endpoint.ResponseType.Name};");
+    }
+
+    private void AppendEffectSchemaBody(StringBuilder fileStr, BuiltEndpoint endpoint)
+    {
+        string requestSchema = Compiler.GetSchemaValueExpression(endpoint.Node.BuiltRequestType!);
+        string responseSchema = Compiler.GetSchemaValueExpression(endpoint.Node.BuiltResponseType!);
+
+        fileStr
+            .AppendLine($"        const body = JSON.stringify(Schema.encodeSync({requestSchema})(request));")
+            .AppendLine("        const bodyBytes = new TextEncoder().encode(body);")
+            .AppendLine("        const res = await fetch(url, { method: '" + endpoint.Node.Method.ToString().ToUpper() + "', headers: { 'Content-Type': 'application/json; charset=utf-8' }, body: bodyBytes } as RequestInit);")
+            .AppendLine("        if (!res.ok) throw new Error('HTTP ' + res.status);")
+            .AppendLine("        const bytes = new Uint8Array(await res.arrayBuffer());")
+            .AppendLine("        const json = new TextDecoder().decode(bytes);")
+            .AppendLine($"        return Schema.decodeUnknownSync({responseSchema})(JSON.parse(json));");
     }
 }
 
