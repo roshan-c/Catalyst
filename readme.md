@@ -151,4 +151,4 @@ C# Client, C# Server via ASP.NET Controllers
 ### Unreal Engine 5
 Unreal Engine 5 Client (requires the [Unreal Engine Catalyst Plugin](https://github.com/dynamiquel/Catalyst-UEPlugin)
 ### TypeScript
-TypeScript Client
+TypeScript Client (plain classes by default, Effect Schema definitions with `--TsSchema=effect`)
